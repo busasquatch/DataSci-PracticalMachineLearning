@@ -1,0 +1,227 @@
+---
+output:
+  html_document:
+    keep_md: yes
+---
+Practical Machine Learning - Prediction Assignment
+===========
+#### October 2014  
+
+## Introduction  
+The objective of this analysis is to build a machine learning algorithm that accurately predicts the fashion in which a human is performing a dumbell lift. The prediction is done using data captured from accelerometers that measure bodily movements of subjects performing the dumbell lifts.  
+
+## Data Summary    
+Six male subjects ranging in age between 20 - 28 years were fitted with accelerometers was placed on the belt, forearm, arm.  An additional accelerometer placed on the dumbell.  The subjects performed dumbell lifts in five different fashions, one correct way (class A), and four different incorrect ways (classes B, C, D, E).  Measurements from the accelerometers were caputured during the exercise in sliding time windows ranging from 0.5 to 2.5 seconds.   
+
+The data source and the original study are from the paper *Qualitative Activity Recognition of Weight Lifting Exercieses*. (Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.  Available at [http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201][1])
+
+## System Information
+The analysis was done using R. The following packages are required for the analysis and presentation herein.  Full session information can be found at the end of this paper.  
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(lattice)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(randomForest)
+```
+
+## Data Source and Download  
+As of October 25, 2014, the data was available at [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv][2]
+
+The data was downloaded and a preview in a text editor was done to identify potential strings that should be set to NA.  During the data import to R, strings matching "NA" and "#DIV/0!" were coerced to NA values in R.
+
+```{r download, eval=FALSE}
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+filename <- "pml-training.csv"
+# method for mac
+download.file(url, destfile = filename, method = "curl")
+# method for windows
+# download.file(url, destfile = filename)
+```
+  
+```{r read, cache = TRUE}
+filename <- "pml-training.csv"
+data <- read.csv(filename, header = TRUE, na.strings = c("NA", "#DIV/0!"))
+```
+
+```{r dim, echo = FALSE, results='hide'}
+dim(data)
+```
+The import results in a dataframe with `r dim(data)[1]` observations and `r dim(data)[2]` variables.
+
+## Data Preparation    
+### Data Cleaning  
+First, the names of the variables were checked.  The analyst noticed that the first variable did not have a column header.  This variable is a pseudo row number, and thus was renamed as observationId.  Upon reviewing the variable names in the table below, the analyst noticed that meausres were grouped by accelerometer position, and that each group of variables shared the same meausures.  For each group there are raw measures (i.e. roll, pitch, yaw, x, y, and z measures), and statistical and summary measures (i.e. skewness, kurtosis, etc.). 
+
+```{r dp1}
+colnames(data)[1] <- "observationId"
+names(data)
+```
+
+Machine learning algorithms work on data without missing values, thus variables with missing values were eliminated.  
+```{r dp2}
+# create a T/F vector identify variables with at least one NA
+missingcols <- sapply(data, function(x) { any(is.na(x)) })
+
+# replace data by keeping only those variables that don't have missing data
+data <- data[ , !missingcols]
+```
+
+Interestingly, all the statistical and summary measures, except for total acceleration measures, contained missing values, and were eliminated.  The resulting dataset includes the identifying observation variables [1 -7], the raw accelerometer measurements plus the summary variable total acceleartion [8 - 59], and the fashion in which the exercise was performed (classe) [60]. 
+```{r dp3}
+names(data)
+```
+
+### Cross Validation  
+The dataset is large enough to perform cross validation using a 70/30 split of training and testing data.  An arbitrary seed was set to assure reproducibility, and the training and testing sets were created using *createDataPartition* from the *caret* package.  The dimensions of the resulting datasets were confirmed through output.  
+```{r cv}
+# set seed
+set.seed(123)
+
+# create training and test sets
+inTrain <- caret::createDataPartition(y = data$classe, p = 0.7, list = FALSE)
+
+# subset
+training <- data[inTrain, ]
+testing <- data[-inTrain, ]
+```
+
+```{r cv2, echo=FALSE, eval=FALSE}
+# confirm training
+# dim(training); dim(testing)
+```
+
+The training set has `r dim(training)[1]` observations and `r dim(training)[2]` variables.  
+The testing set has `r dim(testing)[1]` observations and `r dim(testing)[2]` variables.  
+
+## Exploratory Analysis  
+Using only the training set, the anlayst embarked on explortory analysis.  
+
+Looking at boxplots of belt measures on roll, pitch, yaw, and total acceleation grouped by the method in which the barbell lift was performed.  It is clear that the median values of method A differs greatly from the methods B, C, D, and E in roll, yaw, and acceleartion.  However, it does not appear there are distinguishing median values that would help classify methods B, C, D, and E from each other. 
+
+```{r explore}
+#four ggplot boxplots
+p.roll.belt <- ggplot(training, aes(classe, roll_belt))
+p.roll.belt <- p.roll.belt + geom_boxplot() + ggtitle("Roll Belt")
+p.pitch.belt <- ggplot(training, aes(classe, pitch_belt))
+p.pitch.belt <- p.pitch.belt + geom_boxplot() + ggtitle("Pitch Belt")
+p.yaw.belt <- ggplot(training, aes(classe, yaw_belt))
+p.yaw.belt <- p.yaw.belt + geom_boxplot() + ggtitle("Yaw Belt")
+p.accel.belt <- ggplot(training, aes(classe, total_accel_belt))
+p.accel.belt <- p.accel.belt + geom_boxplot() + ggtitle("Total Accel Belt")
+gridExtra::grid.arrange(p.roll.belt, p.pitch.belt, p.yaw.belt, p.accel.belt, ncol = 2, nrow = 2)
+```
+
+## Simple Decision Tree Model
+Even though it did not seem that the methods could be classified using only roll belt, ptich belt, yaw belt, and total acceleration belt, the analyst was curious on how accurate a simple decision tree model could be using only these four measures as predictors.  The decision tree was run with 25 reps of bootstrapping.  
+
+```{r tree1, cache=TRUE}
+# simple decision tree model, isolating the class (60) as the outcome and 
+# variables 8 - 11 as predictors  
+modFit <- caret::train(classe ~ ., method = "rpart", data = training[,c(8:11,60)])
+```
+
+The resulting dendogram shows that the resulting decision tree classifies methods as either A or E only.  
+```{r tree2, fig.width=6, fig.height=4}
+rattle::fancyRpartPlot(modFit$finalModel)
+```
+
+### Decision Tree Accuracy and Predictions  
+Given that the decision tree did not classify any methods as B, C, or D, the analyst expected that the prediction accuracy rate would be low.  This was confirmed by cross validation, making classification predictions on the testing set using the model built with the training set.  
+
+```{r tree3}
+# make sure to use the same variables from the testing set as were used in the training set.  
+predictions <- predict(modFit, newdata = testing[,c(8:11,60)])
+```
+
+The accuracy was only 39.2% as shown in the confusion matrix.  
+
+```{r tree4} 
+# output confusion matrix
+confusionMatrix(predictions, testing$classe)
+```
+
+While the code and output is not shown here, a simple decision tree was run using all variables as predictors.  Even with such a model, the prediction accuracy was only 55.2%.  Thus, the analyst decided to pursue a random forest algorithm to achieve a better prediction rate.  
+
+```{r rf.allvariables, cache=TRUE, eval = FALSE, echo = FALSE}
+modFit.dt.2 <- caret::train(classe ~ ., method = "rpart", data = training[,c(8:60)])
+modFit.dt.2
+modFit.dt.2$finalModel
+rattle::fancyRpartPlot(modFit.dt.2$finalModel)
+predictions.dt.2 <- predict(modFit.dt.2, newdata = testing[,c(8:60)])
+confusionMatrix(predictions.dt.2, testing$classe)
+```
+
+
+## Random Forest Model  
+A random forest model was built using all of the prediction variables and the classe variable as the categorical outcome.  A random forest was attempted with the train function from the caret package and also with the randomForest function from the randomForest package.  The analyst let the train function run for 75 minutes and the function never completed.  The randomForest method ran in under two minutes, and thus the randomForest method was used to build the random forest.  
+
+```{r rf, cache=TRUE}
+# random forest using all predictors
+# using 
+modFit.rf <- randomForest::randomForest(classe ~ ., data = training[,c(8:60)])
+# caret random forest.  never completed
+# tr <- trainControl(method = "repeatedcv", number = 5 )
+# modFit.rf <- caret::train(classe ~., data = training[,c(8:60)], method = "rf", prox = TRUE, trControl = tr)
+```
+
+The resulting in-sample out-of-bag estimate of error rate was 0.52%.  This is the error rate expected if the model was applied to a real world dataset that was not used to train the model.  By setting aside 30% of the original dataset as a testing set, which was not used to train the random forest model at all, a pseudo-real world dataset is available to test to the accuracy of the model.  
+
+```{r}
+modFit.rf
+```
+
+### Random Forest Evaluation  
+
+#### Predictions  
+According to Leo Breiman and Adele Cutler, the founders of random forests, "there is no need for cross-valdiation or a separate test set to get an unbiased estimate of the test set error." (see [https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr][3])  However, using the testing set, the prediction out-of-sample estimate of error can be confirmed through cross-validation.  The analyst made predictions of the testing set against the random model and the resulting confusion matrix is shown.  The accuracy is reported at 99.44%, thus an out-of-sample error rate of 0.54%, which is very close to the in-sample estimate of error rate of 0.52%.  
+
+```{r rf2}
+predictions.rf <- predict(modFit.rf, newdata = testing[,c(8:60)])
+confusionMatrix(predictions.rf, testing$classe)
+```
+
+
+This plot shows the class error rates of the random forest model.  As the number of trees increases, the error rate approaches zero.  
+```{r, fig.height=4, fig.width=6}
+plot(modFit.rf, main = "Error rate of random forest")
+```
+
+
+#### Importance of Variables  
+
+According to [https://dinsdalelab.sdsu.edu/metag.stats/code/randomforest.html][4], "the mean decrease in Gini coefficient is a measure of how each variable contributes to the homogeneity of the nodes and leaves in the resulting random forest...Variables that result in nodes with higher purity have a higheer decrease in Gini cofficient."  This importance chart displays the variables that affected the random forest, from greatest impact to least impact, from top to bottom.  Euler angle measurments from the belt (roll, yaw, and pitch) and measurements from the dumbell magnetometer have a strong impact on distinguishing the method class.  The Euler angle roll from the forearm also has an impact on the model.  Other measurements have a smaller increasing impact.  
+
+```{r imporatance, echo=FALSE, eval=FALSE}
+# produces a table of variables, sorted by deceasing importance
+tbl.importance <- data.frame(feature = rownames(modFit.rf$importance),MeanDecreaseGini = modFit.rf$importance)
+row.names(tbl.importance) <- c(1:dim(tbl.importance)[1])
+tbl.importance <- tbl.importance[order(-tbl.importance$MeanDecreaseGini, tbl.importance$feature),]
+tbl.importance
+```
+
+```{r importance.plot, fig.height=8}
+varImpPlot(modFit.rf, pch = 20, main = "Importance of Variables")
+```
+
+This concludes the report.  
+
+```{r, echo = FALSE, eval = FALSE}
+# positive margin mean correct classification
+# requires RColorBrewer
+plot(margin(modFit.rf, testing$classe))
+```
+
+## Session Info
+```{r sessioninfo, echo=FALSE}
+sessionInfo()
+```
+
+[1]: http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201 
+[2]: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+[3]: https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr
+[4]: https://dinsdalelab.sdsu.edu/metag.stats/code/randomforest.html  
