@@ -1,4 +1,5 @@
 DataSci-PracticalMachineLearning
+Practical Machine Learning Course
 October 2014
 ================================
 
